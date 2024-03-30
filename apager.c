@@ -11,6 +11,8 @@
 
 # define STACK_PAGES 64
 
+void* phdr_addr;
+
 // load segments
 // mmap(addr)
 // need to make sure addr doesn't conflict, otherwise will not be in correct place
@@ -35,25 +37,135 @@
 // indicates no longer in execve
 // updates mm integral fields in task struct for accounting
 
-void new_aux_ent(uint64_t* aux_ptr, uint64_t val, uint64_t id)
+void* load_elf(char* filename)
 {
-	*(aux_ptr) = val;
-	*(--aux_ptr) = id;
+    Elf64_Ehdr ehdr;
+    int elf_fd = open(filename, O_RDONLY);
+    if (elf_fd == -1) {
+        fprintf(stderr, "Error opening file, errno: %s\n", strerror(errno));
+        exit(EXIT_FAILURE);
+    }
+    int err = read(elf_fd, (void*) &ehdr, sizeof(Elf64_Ehdr));
+    if (err == -1) {
+        fprintf(stderr, "Error reading elf header\n");
+        exit(EXIT_FAILURE);
+    }
+
+    // void* entry_addr = (void *) ehdr.e_entry;
+    Elf64_Half phnum =ehdr.e_phnum;
+    Elf64_Half phent = ehdr.e_phentsize;
+    printf("%d \n", phnum);
+    printf("%d \n", phent);
+
+    // Elf
+    uint8_t set_phdr = 1;
+
+    off_t offset = lseek(elf_fd, ehdr.e_phoff, SEEK_SET);
+    off_t base_offset = offset;
+    printf("offset %d\n", offset);
+    printf("headers %d\n", ehdr.e_phnum * ehdr.e_phentsize);
+    for (Elf64_Half i = 1; i <= ehdr.e_phnum; i++)
+    {
+        Elf64_Phdr phdr;
+        err = read(elf_fd, (void*) &phdr, sizeof(phdr));
+        if (err == -1) {
+            fprintf(stderr, "Error reading elf program header\n");
+            exit(EXIT_FAILURE);
+        }
+
+        if (phdr.p_type == PT_LOAD && phdr.p_memsz > 0)
+        {   
+            printf("ehdr.e_phoff %d\n", ehdr.e_phoff);
+            if (set_phdr)
+            {
+                phdr_addr = (char*) phdr.p_vaddr + ehdr.e_phoff;
+                set_phdr = 0;
+            }
+
+            printf("%p %p\n", phdr.p_vaddr, phdr.p_filesz);
+            int prot = 0;
+            if(phdr.p_flags & PF_R)
+                prot |= PROT_READ;
+            if(phdr.p_flags & PF_W)
+                prot |= PROT_WRITE;
+            if(phdr.p_flags & PF_X)
+                prot |= PROT_EXEC;
+            
+            size_t align_bytes = phdr.p_offset % sysconf(_SC_PAGESIZE);
+            size_t align_vaddr = phdr.p_vaddr - align_bytes;
+            size_t align_offset = phdr.p_offset - align_bytes;
+            // zero out bytes afterwards
+
+            char* seg_addr = mmap((void*) align_vaddr, align_bytes + phdr.p_memsz, PROT_WRITE, 
+                                MAP_PRIVATE | MAP_POPULATE | MAP_FIXED | MAP_ANONYMOUS, -1, 0);
+            printf("%p\n", seg_addr);
+            if (seg_addr == MAP_FAILED) {
+                fprintf(stderr, "mmap failed\n");
+                exit(EXIT_FAILURE);
+            }
+            memset(seg_addr, 0x0, align_bytes);
+            lseek(elf_fd, phdr.p_offset, SEEK_SET);
+            err = read(elf_fd, (seg_addr + align_bytes), phdr.p_filesz); sizeof(phdr);
+            if (err == -1) {
+                fprintf(stderr, "Error reading elf program header\n");
+                exit(EXIT_FAILURE);
+            }
+            err = mprotect(align_vaddr, align_bytes + phdr.p_memsz, prot);
+            if (err == -1) {
+                fprintf(stderr, "mprotect failed\n");
+                exit(EXIT_FAILURE);
+            }
+
+            
+
+            // if p_memsz > p_filesz, bss section so clear
+            // if (phdr.p_memsz > phdr.p_filesz)
+            // {
+            //     char* bss_addr = mmap((void*) (phdr.p_vaddr + phdr.p_filesz + align_bytes), phdr.p_memsz - phdr.p_filesz, 
+            //                         PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_POPULATE | MAP_FIXED | MAP_ANONYMOUS, -1, 0);
+            //     if (bss_addr == MAP_FAILED) {
+            //         fprintf(stderr, "mmap failed\n");
+            //         exit(EXIT_FAILURE);
+            //     }
+            //     printf("bss_addr: %p\n", seg_addr);
+            // }
+            // printf("seg_addr: %p\n", seg_addr);
+        }
+        offset = lseek(elf_fd, base_offset + i * sizeof(phdr), SEEK_SET);
+        printf("offset %d \n", offset);
+    }
+    close(elf_fd);
+    
+    // return entry_addr
+    return (void*) ehdr.e_entry;
 }
 
-void* setup_stack(char* filename, int argc, char** argv, char** envp)
+void new_aux_ent(uint64_t* aux_ptr, uint64_t val, uint64_t id)
+{
+    printf("1 %p", aux_ptr);
+	*(aux_ptr) = val;
+	*(--aux_ptr) = id;
+    printf("2 %p", aux_ptr);
+}
+
+void* setup_stack(char* filename, int argc, char** argv, char** envp, void* entry)
 {
     size_t size = STACK_PAGES * sysconf(_SC_PAGESIZE);
     uintptr_t addr = 0x600000;
-    void* stack_addr = mmap((void *)addr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE, -1, 0);
+    char* stack_addr = mmap((void*)addr, size, PROT_READ | PROT_WRITE, 
+                        MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE, -1, 0);
+    if (stack_addr == MAP_FAILED) {
+        fprintf(stderr, "mmap failed\n");
+        exit(EXIT_FAILURE);
+    }
     char* stack_ptr = (char*) addr + size;
 
     // walk to auxv
     char** tmp = envp;
 	while (*tmp++ != NULL) {}
 
-
-    Elf64_auxv_t *auxv = (Elf64_auxv_t *) tmp;
+    // set up auxv
+    Elf64_auxv_t* auxv = (Elf64_auxv_t*) tmp;
     int auxc = 0;
     while (auxv->a_type != AT_NULL)
     {
@@ -65,16 +177,38 @@ void* setup_stack(char* filename, int argc, char** argv, char** envp)
     uint64_t* aux_ptr = (uint64_t*) stack_ptr;
     new_aux_ent(--aux_ptr, auxv->a_un.a_val, auxv->a_type);
     aux_ptr--;
+    printf("phdr %d\n", AT_PHDR);
+    printf("entry %d\n", AT_ENTRY);
     for (auxc; auxc > 0; auxc--)
     {
         auxv--;
-        new_aux_ent(--aux_ptr, auxv->a_un.a_val, auxv->a_type);
+        printf("type %d\n", auxv->a_type);
+        switch (auxv->a_type)
+        {
+			case AT_PHDR:
+			{
+                printf("there\n");
+                new_aux_ent(--aux_ptr, (uint64_t) phdr_addr, AT_PHDR);
+				break;
+			}
+            case AT_ENTRY:
+            {
+                printf("here\n");
+                new_aux_ent(--aux_ptr, (uint64_t) entry, AT_ENTRY);
+                break;
+            }
+            default:
+            {
+                new_aux_ent(--aux_ptr, auxv->a_un.a_val, auxv->a_type);
+                break;
+            }
+        }
         aux_ptr--;
     }
 
     // set up envp
-    char** char_ptr = (char**) aux_ptr;
-    memset(--char_ptr, 0, sizeof(char**));
+    char** env_ptr = (char**) aux_ptr;
+    memset(--env_ptr, 0, sizeof(char**));
     size_t envc = 0;
     for (char** env = envp; *env != NULL; env++)
     {
@@ -82,21 +216,21 @@ void* setup_stack(char* filename, int argc, char** argv, char** envp)
     }
     for (int i = envc - 1; i >= 0; i--)
     {
-        *(--char_ptr) = envp[i];
+        *(--env_ptr) = envp[i];
     }
 
     // set up argv
-    memset(--char_ptr, 0, sizeof(char**));
-    // don't copy argv[i]; it's the pager
+    char** arg_ptr = (char**) env_ptr;
+    memset(--arg_ptr, 0, sizeof(char**));
     for (int i = argc - 1; i >= 0; i--)
     {
-        *(--char_ptr) = argv[i];
+        *(--arg_ptr) = argv[i];
     }
 
-    long* long_ptr = (long*) char_ptr;
-    *(--long_ptr) = argc;
+    long* argc_ptr = (long*) arg_ptr;
+    *(--argc_ptr) = argc;
 
-    return (void*) long_ptr;
+    return (void*) argc_ptr;
 
 }
 
@@ -136,18 +270,173 @@ void stack_check(void* top_of_stack, uint64_t argc, char** argv) {
 	printf("----- end stack check -----\n");
 }
 
+int stack_check_2(char** argv) {
+	char** sp = argv;
+	printf("argv\n");
+	/* walk past all argv pointers */
+	while (*sp++ != NULL)
+	{
+        printf("argv %p \n", *sp);
+		if(*sp != NULL)
+			printf("%s\n", *sp);
+	}
+
+	printf("envp\n");
+	/* walk past all env pointers */
+	while (*sp++ != NULL)
+	{
+        printf("envp %p \n", *sp);
+		// if(*sp != NULL)
+		// 	printf("%s\n", *sp);
+	}
+
+        /* and find ELF auxiliary vectors (if this was an ELF binary) */
+	int i = 0;
+    for (Elf64_auxv_t *auxv = (Elf64_auxv_t *) sp; auxv->a_type != -1; ++auxv) {
+        printf("%d : ", ++i);
+        switch (auxv->a_type)
+        {
+            case AT_NULL:
+            {
+                printf("AT_NULL\n");
+                return 0;
+            }
+            case AT_SYSINFO_EHDR:
+            {
+                printf("AT_SYSINFO_EHDR : %p\n", (void*) auxv->a_un.a_val);
+                break;
+            }
+            case AT_MINSIGSTKSZ:
+            {
+                printf("AT_MINSIGSTKSZ : %lu\n", auxv->a_un.a_val);
+                break;
+            }
+            case AT_HWCAP:
+            {
+                printf("AT_HWCAP : %lu\n", auxv->a_un.a_val);
+                break;
+            }
+            case AT_PAGESZ:
+            {
+                printf("AT_PAGESZ : %lu\n", auxv->a_un.a_val);
+                break;
+            }
+            case AT_CLKTCK:
+            {
+                printf("AT_CLKTCK : %lu\n", auxv->a_un.a_val);
+                break;
+            }	
+            case AT_PHDR:
+            {
+                printf("AT_PHDR : %p\n", (void*) auxv->a_un.a_val);
+                break;
+            }
+            case AT_PHENT:
+            {
+                printf("AT_PHENT : %lu\n", auxv->a_un.a_val);
+                break;
+            }
+            case AT_PHNUM:
+            {
+                printf("AT_PHNUM : %lu\n", auxv->a_un.a_val);
+                break;
+            }
+            case AT_BASE:
+            {
+                printf("AT_BASE : %p\n", (void*) auxv->a_un.a_val);
+                break;
+            }
+            case AT_FLAGS:
+            {
+                printf("AT_FLAGS : %lu\n", auxv->a_un.a_val);
+                break;
+            }
+            case AT_ENTRY:
+            {
+                printf("AT_ENTRY : %p\n", (void*) auxv->a_un.a_val);
+                break;
+            }
+            case AT_UID:
+            {
+                printf("AT_UID : %lu\n", auxv->a_un.a_val);
+                break;
+            }
+            case AT_EUID:
+            {
+                printf("AT_EUID : %lu\n", auxv->a_un.a_val);
+                break;
+            }
+            case AT_GID:
+            {
+                printf("AT_GID : %lu\n", auxv->a_un.a_val);
+                break;
+            }
+            case AT_EGID:
+            {
+                printf("AT_EGID : %lu\n", auxv->a_un.a_val);
+                break;
+            }	
+            case AT_SECURE:
+            {
+                printf("AT_SECURE : %lu\n", auxv->a_un.a_val);
+                break;
+            }
+            case AT_RANDOM:
+            {
+                printf("AT_RANDOM : %p\n", (void*) auxv->a_un.a_val);
+                break;
+            }
+            case AT_EXECFN:
+            {
+                printf("AT_EXECFN : %lu\n", auxv->a_un.a_val);
+                break;
+            }
+            case AT_HWCAP2:
+            {
+                printf("AT_HWCAP2 : %lu\n", auxv->a_un.a_val);
+                break;
+            }
+            case AT_PLATFORM:
+            {
+                printf("AT_PLATFORM : %lu\n", auxv->a_un.a_val);
+                break;
+            }	
+        }
+    }
+}
+
 int main(int argc, char** argv, char** envp)
 {
-    int elf_fd = open(argv[1], O_RDONLY);
-    if (elf_fd == -1) {
-        fprintf(stderr, "Error opening file, errno: %s\n", strerror(errno));
-        exit(EXIT_FAILURE);
-    }
+    void* entry_addr = load_elf(argv[1]);
 
-    void* stack_ptr = setup_stack(argv[1], argc, argv, envp);
+    void* stack_ptr = setup_stack(argv[1], argc, argv, envp, entry_addr);
 
-    printf("%p\n", stack_ptr);
-    stack_check(stack_ptr, argc, argv);
+    // stack_check(stack_ptr, argc, argv);
+
+    // stack_check_2(stack_ptr);
+    // stack_check_2(argv);
+
+    printf("entry_addr: %p\n", entry_addr);
+
+    asm volatile("movq %0, %%rsp\n\t" : "+r" ((uint64_t) stack_ptr));
+    asm volatile("movq %0, %%rax\n\t" : "+r" ((uint64_t) entry_addr));
+    asm volatile("push %rax\n\t");
+    asm volatile("movq $0, %rax");
+    asm volatile("movq $0, %rbx");
+    asm volatile("movq $0, %rcx");
+    asm volatile("movq $0, %rdx");
+    asm volatile("movq $0, %rsi");
+    asm volatile("movq $0, %rdi");
+    // asm volatile("movq $0, %rbp");
+    asm volatile("movq $0, %r8");
+    asm volatile("movq $0, %r9");
+    asm volatile("movq $0, %r10");
+    asm volatile("movq $0, %r11");
+    asm volatile("movq $0, %r12");
+    asm volatile("movq $0, %r13");
+    asm volatile("movq $0, %r14");
+    asm volatile("movq $0, %r15");
+    asm volatile("ret\n\t");
 
 }
 
