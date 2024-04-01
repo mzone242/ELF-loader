@@ -8,14 +8,115 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <signal.h>
 
 # define STACK_PAGES 64
 
+char* filename;
 void* phdr_addr;
+Elf64_Ehdr ehdr;
 
-void* load_elf(char* filename)
+static void handler(int sig, siginfo_t* si, void* unused)
 {
-    Elf64_Ehdr ehdr;
+    // printf("SIGSEGV at address: %p\n", (void*) si->si_addr);
+
+
+    int elf_fd = open(filename, O_RDONLY);
+    if (elf_fd == -1) {
+        fprintf(stderr, "Error opening file, errno: %s\n", strerror(errno));
+        exit(EXIT_FAILURE);
+    }
+    int err;
+
+    off_t offset = lseek(elf_fd, ehdr.e_phoff, SEEK_SET);
+    off_t base_offset = offset;
+    for (Elf64_Half i = 1; i <= ehdr.e_phnum; i++)
+    {
+        Elf64_Phdr phdr;
+        err = read(elf_fd, (void*) &phdr, sizeof(phdr));
+        if (err == -1) {
+            fprintf(stderr, "Error reading elf program header\n");
+            exit(EXIT_FAILURE);
+        }
+        if (phdr.p_type != PT_LOAD || !phdr.p_memsz || (uint64_t) si->si_addr < phdr.p_vaddr || (uint64_t) si->si_addr > phdr.p_vaddr + phdr.p_memsz)
+        {
+            offset = lseek(elf_fd, base_offset + i * sizeof(phdr), SEEK_SET);
+        }
+        else 
+        {
+
+            int prot = 0;
+            if(phdr.p_flags & PF_R)
+                prot |= PROT_READ;
+            if(phdr.p_flags & PF_W)
+                prot |= PROT_WRITE;
+            if(phdr.p_flags & PF_X)
+                prot |= PROT_EXEC;
+            
+            size_t align_bytes_offset = (uint64_t) si->si_addr % sysconf(_SC_PAGESIZE);
+            size_t align_vaddr = (uint64_t) si->si_addr - align_bytes_offset;
+            size_t segment_offset = align_vaddr - phdr.p_vaddr;
+            size_t new_offset = phdr.p_offset + segment_offset;
+            size_t align_bytes = new_offset % sysconf(_SC_PAGESIZE);
+            // zero out bytes afterwards
+
+            char* seg_addr = mmap((void*) align_vaddr, sysconf(_SC_PAGESIZE), PROT_WRITE, 
+                                MAP_PRIVATE | MAP_POPULATE | MAP_FIXED | MAP_ANONYMOUS, -1, 0);
+            if (seg_addr == MAP_FAILED) {
+                fprintf(stderr, "mmap failed\n");
+                exit(EXIT_FAILURE);
+            }
+            // printf("Allocated %d at %p\n", sysconf(_SC_PAGESIZE), seg_addr);
+            memset(seg_addr, 0x0, align_bytes);
+            lseek(elf_fd, new_offset, SEEK_SET);
+
+            // read at most 1 page
+            size_t read_bytes = sysconf(_SC_PAGESIZE) - align_bytes;
+            if (phdr.p_filesz + phdr.p_vaddr < seg_addr + sysconf(_SC_PAGESIZE))
+            {
+                size_t sub_offset = seg_addr + sysconf(_SC_PAGESIZE);
+                sub_offset -= phdr.p_filesz;
+                sub_offset -= phdr.p_vaddr;
+                read_bytes -= sub_offset;
+            }
+            
+
+            // if bss, don't read
+            if (read_bytes <= sysconf(_SC_PAGESIZE))
+            {
+                err = read(elf_fd, (seg_addr + align_bytes), read_bytes);
+                if (err == -1) {
+                    fprintf(stderr, "Error reading elf program\n");
+                    exit(EXIT_FAILURE);
+                }
+            }
+            err = mprotect((void *) align_vaddr, sysconf(_SC_PAGESIZE), prot);
+            if (err == -1) {
+                fprintf(stderr, "mprotect failed\n");
+                exit(EXIT_FAILURE);
+            }
+            close(elf_fd);
+            return;
+
+        }
+    }
+    close(elf_fd);
+
+    // do i need this?
+    char* seg_addr = mmap((void*) si->si_addr, sysconf(_SC_PAGESIZE), PROT_READ | PROT_WRITE, 
+                        MAP_PRIVATE | MAP_POPULATE | MAP_FIXED | MAP_ANONYMOUS, -1, 0);
+    if (seg_addr == MAP_FAILED) {
+        fprintf(stderr, "bss mmap failed\n");
+        exit(EXIT_FAILURE);
+    }
+
+    printf("Segfault for real\n");
+
+    exit(EXIT_FAILURE);
+}
+
+void* load_elf()
+{
     int elf_fd = open(filename, O_RDONLY);
     if (elf_fd == -1) {
         fprintf(stderr, "Error opening file, errno: %s\n", strerror(errno));
@@ -32,7 +133,7 @@ void* load_elf(char* filename)
 
     off_t offset = lseek(elf_fd, ehdr.e_phoff, SEEK_SET);
     off_t base_offset = offset;
-    for (Elf64_Half i = 1; i <= ehdr.e_phnum; i++)
+    for (Elf64_Half i = 1; i <= ehdr.e_phnum && set_phdr; i++)
     {
         Elf64_Phdr phdr;
         err = read(elf_fd, (void*) &phdr, sizeof(phdr));
@@ -59,23 +160,31 @@ void* load_elf(char* filename)
             
             size_t align_bytes = phdr.p_offset % sysconf(_SC_PAGESIZE);
             size_t align_vaddr = phdr.p_vaddr - align_bytes;
-            // size_t align_offset = phdr.p_offset - align_bytes;
+            size_t align_offset = phdr.p_offset - align_bytes;
+            size_t size = align_bytes + phdr.p_memsz;
+            if (size > sysconf(_SC_PAGESIZE))
+                size = sysconf(_SC_PAGESIZE);
             // zero out bytes afterwards
 
-            char* seg_addr = mmap((void*) align_vaddr, align_bytes + phdr.p_memsz, PROT_WRITE, 
+            char* seg_addr = mmap((void*) align_vaddr, size, PROT_WRITE, 
                                 MAP_PRIVATE | MAP_POPULATE | MAP_FIXED | MAP_ANONYMOUS, -1, 0);
+            // printf("Allocated %d at %p\n", size, seg_addr);
             if (seg_addr == MAP_FAILED) {
                 fprintf(stderr, "mmap failed\n");
                 exit(EXIT_FAILURE);
             }
             memset(seg_addr, 0x0, align_bytes);
             lseek(elf_fd, phdr.p_offset, SEEK_SET);
-            err = read(elf_fd, (seg_addr + align_bytes), phdr.p_filesz);
+            size_t fsize = align_bytes + phdr.p_filesz;
+            if (fsize > sysconf(_SC_PAGESIZE))
+                fsize = sysconf(_SC_PAGESIZE);
+            fsize -= align_bytes;
+            err = read(elf_fd, (seg_addr + align_bytes), fsize);
             if (err == -1) {
                 fprintf(stderr, "Error reading elf program header\n");
                 exit(EXIT_FAILURE);
             }
-            err = mprotect((void *) align_vaddr, align_bytes + phdr.p_memsz, prot);
+            err = mprotect((void *) align_vaddr, size, prot);
             if (err == -1) {
                 fprintf(stderr, "mprotect failed\n");
                 exit(EXIT_FAILURE);
@@ -350,7 +459,20 @@ int stack_check_2(char** argv) {
 
 int main(int argc, char** argv, char** envp)
 {
-    void* entry_addr = load_elf(argv[1]);
+    // Set up SIGSEGV handler
+    struct sigaction sa;
+    int err;
+    sa.sa_flags = SA_SIGINFO | SA_NODEFER;
+    sa.sa_sigaction = handler;
+    err = sigaction(SIGSEGV, &sa, NULL);
+    if (err == -1)
+    {
+        printf("Failed to set up sigaction\n");
+        exit(EXIT_FAILURE);
+    }
+    
+    filename = argv[1];
+    void* entry_addr = load_elf();
 
     void* stack_ptr = setup_stack(argv[1], argc, argv, envp, entry_addr);
 
