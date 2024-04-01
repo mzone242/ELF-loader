@@ -68,7 +68,8 @@ void* load_elf(char* filename)
                 fprintf(stderr, "mmap failed\n");
                 exit(EXIT_FAILURE);
             }
-            memset(seg_addr, 0x0, align_bytes);
+            fprintf(stderr, "Allocated %ld bytes at %p with file offset %lx\n", align_bytes + phdr.p_memsz, seg_addr, phdr.p_offset);
+            // memset(seg_addr, 0x0, align_bytes);
             lseek(elf_fd, phdr.p_offset, SEEK_SET);
             err = read(elf_fd, (seg_addr + align_bytes), phdr.p_filesz);
             if (err == -1) {
@@ -98,7 +99,7 @@ void new_aux_ent(uint64_t* aux_ptr, uint64_t val, uint64_t id)
 void* setup_stack(char* filename, int argc, char** argv, char** envp, void* entry)
 {
     size_t size = STACK_PAGES * sysconf(_SC_PAGESIZE);
-    uintptr_t addr = 0x600000;
+    uintptr_t addr = 0x3e00000;
     char* stack_addr = mmap((void*)addr, size, PROT_READ | PROT_WRITE, 
                         MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE, -1, 0);
     if (stack_addr == MAP_FAILED) {
@@ -350,6 +351,7 @@ int stack_check_2(char** argv) {
 
 int main(int argc, char** argv, char** envp)
 {
+
     void* entry_addr = load_elf(argv[1]);
 
     void* stack_ptr = setup_stack(argv[1], argc, argv, envp, entry_addr);
