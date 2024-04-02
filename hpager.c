@@ -16,7 +16,6 @@ char* filename;
 void* phdr_addr;
 Elf64_Ehdr ehdr;
 uint64_t pages_to_map = 2;
-// make a big array?
 
 static void handler(int sig, siginfo_t* si, void* unused)
 {
@@ -27,7 +26,7 @@ static void handler(int sig, siginfo_t* si, void* unused)
         exit(EXIT_FAILURE);
     }
 
-    printf("SIGSEGV at address: %p\n", (void*) si->si_addr);
+    // printf("SIGSEGV at address: %p\n", (void*) si->si_addr);
     size_t align_bytes = (uint64_t) si->si_addr % sysconf(_SC_PAGESIZE);
     size_t align_vaddr = (uint64_t) si->si_addr - align_bytes;
     int flags = MAP_PRIVATE | MAP_POPULATE | MAP_FIXED | MAP_ANONYMOUS;
@@ -36,10 +35,10 @@ static void handler(int sig, siginfo_t* si, void* unused)
         char* seg_addr = mmap((void*) align_vaddr + i * sysconf(_SC_PAGESIZE), sysconf(_SC_PAGESIZE), PROT_READ | PROT_WRITE, 
                             flags, -1, 0);
         if (seg_addr == MAP_FAILED) {
-            fprintf(stderr, "mmap failed\n");
+            fprintf(stderr, "mmap failed: %s\n", strerror(errno));
             exit(EXIT_FAILURE);
         }
-        printf("Allocated %ld bytes at %p\n", sysconf(_SC_PAGESIZE), seg_addr);
+        fprintf(stderr, "Allocated %ld bytes at %p\n", sysconf(_SC_PAGESIZE), seg_addr);
         if (i == 0)
             flags = MAP_PRIVATE | MAP_POPULATE | MAP_ANONYMOUS;
     }
@@ -105,7 +104,7 @@ void* load_elf()
                 exit(EXIT_FAILURE);
             }
             fprintf(stderr, "Allocated %ld bytes at %p with file offset %lx\n", size, seg_addr, phdr.p_offset);
-            // memset(seg_addr, 0x0, align_bytes);
+            
             lseek(elf_fd, phdr.p_offset, SEEK_SET);
             err = read(elf_fd, (seg_addr + align_bytes), phdr.p_filesz);
             if (err == -1) {
@@ -135,7 +134,7 @@ void new_aux_ent(uint64_t* aux_ptr, uint64_t val, uint64_t id)
 void* setup_stack(char* filename, int argc, char** argv, char** envp, void* entry)
 {
     size_t size = STACK_PAGES * sysconf(_SC_PAGESIZE);
-    uintptr_t addr = 0x600000;
+    uintptr_t addr = 0x3e00000;
     char* stack_addr = mmap((void*)addr, size, PROT_READ | PROT_WRITE, 
                         MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE, -1, 0);
     if (stack_addr == MAP_FAILED) {

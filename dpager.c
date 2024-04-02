@@ -19,7 +19,7 @@ Elf64_Ehdr ehdr;
 static void handler(int sig, siginfo_t* si, void* unused)
 {
     // printf("SIGSEGV at address: %p\n", (void*) si->si_addr);
-    // catch NULL?
+    // catch NULL
     if (!si->si_addr)
     {
         printf("Segfault\n");
@@ -66,7 +66,6 @@ static void handler(int sig, siginfo_t* si, void* unused)
             size_t align_bytes = new_offset % sysconf(_SC_PAGESIZE);
             // zero out bytes afterwards
 
-            // printf("")
             char* seg_addr = mmap((void*) align_vaddr, sysconf(_SC_PAGESIZE), PROT_WRITE, 
                                 MAP_PRIVATE | MAP_POPULATE | MAP_FIXED | MAP_ANONYMOUS, -1, 0);
             if (seg_addr == MAP_FAILED) {
@@ -74,7 +73,7 @@ static void handler(int sig, siginfo_t* si, void* unused)
                 exit(EXIT_FAILURE);
             }
             fprintf(stderr, "Allocated %ld bytes at %p with file offset %lx\n", sysconf(_SC_PAGESIZE), seg_addr, phdr.p_offset);
-            // memset(seg_addr, 0x0, align_bytes);
+
             lseek(elf_fd, new_offset, SEEK_SET);
 
             // read at most 1 page
@@ -102,7 +101,6 @@ static void handler(int sig, siginfo_t* si, void* unused)
                 fprintf(stderr, "mprotect failed\n");
                 exit(EXIT_FAILURE);
             }
-            // printf("returning\n");
             close(elf_fd);
             return;
 
@@ -173,7 +171,7 @@ void* load_elf()
                 fprintf(stderr, "mmap failed\n");
                 exit(EXIT_FAILURE);
             }
-            // memset(seg_addr, 0x0, align_bytes);
+            
             lseek(elf_fd, phdr.p_offset, SEEK_SET);
             size_t fsize = align_bytes + phdr.p_filesz;
             if (fsize > sysconf(_SC_PAGESIZE))
@@ -207,7 +205,7 @@ void new_aux_ent(uint64_t* aux_ptr, uint64_t val, uint64_t id)
 void* setup_stack(char* filename, int argc, char** argv, char** envp, void* entry)
 {
     size_t size = STACK_PAGES * sysconf(_SC_PAGESIZE);
-    uintptr_t addr = 0x600000;
+    uintptr_t addr = 0x3e00000;
     char* stack_addr = mmap((void*)addr, size, PROT_READ | PROT_WRITE, 
                         MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE, -1, 0);
     if (stack_addr == MAP_FAILED) {

@@ -59,7 +59,6 @@ void* load_elf(char* filename)
             
             size_t align_bytes = phdr.p_offset % sysconf(_SC_PAGESIZE);
             size_t align_vaddr = phdr.p_vaddr - align_bytes;
-            // size_t align_offset = phdr.p_offset - align_bytes;
             // zero out bytes afterwards
 
             char* seg_addr = mmap((void*) align_vaddr, align_bytes + phdr.p_memsz, PROT_WRITE, 
@@ -69,7 +68,7 @@ void* load_elf(char* filename)
                 exit(EXIT_FAILURE);
             }
             fprintf(stderr, "Allocated %ld bytes at %p with file offset %lx\n", align_bytes + phdr.p_memsz, seg_addr, phdr.p_offset);
-            // memset(seg_addr, 0x0, align_bytes);
+            
             lseek(elf_fd, phdr.p_offset, SEEK_SET);
             err = read(elf_fd, (seg_addr + align_bytes), phdr.p_filesz);
             if (err == -1) {
